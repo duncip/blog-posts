@@ -1,0 +1,245 @@
+---
+title: "Broadway flexdashboard example"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+    theme: cerulean
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(tidyverse)
+library(lubridate)
+library(tidymetrics)
+library(ggsci)
+library(plotly)
+
+grosses_raw <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-04-28/grosses.csv')
+synopses_raw <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-04-28/synopses.csv')
+cpi_raw <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-04-28/cpi.csv')
+pre_1985_starts_raw <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-04-28/pre-1985-starts.csv')
+```
+
+```{r}
+grosses <- grosses_raw %>%
+  rename(date = week_ending) %>%
+  mutate_at(vars(weekly_gross:pct_capacity),
+            ~ ifelse(performances + previews == 0 | . == 0, NA, .))
+```
+
+```{r}
+cpi <- cpi_raw %>%
+  mutate(dec_2019_dollars = cpi[year_month == "2019-12-01"] / cpi)
+
+grosses_clean <- grosses %>%
+  filter(year(date) > 1985 & year(date) < 2020) %>%
+  mutate(year_month = floor_date(date, unit = "month")) %>% 
+  left_join(cpi, by = "year_month") %>% 
+  mutate_at(
+    vars(
+      weekly_gross_overall,
+      weekly_gross,
+      potential_gross,
+      avg_ticket_price,
+      top_ticket_price
+    ),
+    ~ . * dec_2019_dollars
+  ) %>%
+  select(-potential_gross, -top_ticket_price, -c(year_month:dec_2019_dollars)) %>%
+  mutate(year = year(date))
+```
+
+```{r}
+top_shows <- grosses_clean %>%
+  group_by(show) %>%
+  summarise(total_gross = sum(weekly_gross, na.rm = TRUE)) %>%
+  arrange(desc(total_gross)) %>%
+  ungroup() %>%
+  head(10) %>%
+  select(show) %>%
+  pull()
+
+grosses_summarised <- grosses_clean %>%
+  filter(show %in% top_shows) %>%
+  cross_by_dimensions(show) %>%
+  cross_by_periods(c("month", "quarter", "year"),
+                   windows = 28) %>% 
+  summarise(
+    usd_gross = sum(weekly_gross, na.rm = TRUE),
+    avg_ticket_price = mean(avg_ticket_price, na.rm = TRUE),
+    nb_seats_sold = sum(seats_sold, na.rm = TRUE),
+    pct_capacity = mean(pct_capacity, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(year = year(date))
+```
+Overview
+======================================================================
+
+Row
+----------------------------------------------------------------------
+
+### Total revenue {.value-box}
+
+
+```{r}
+total_rev <- grosses_summarised %>%
+  filter(period == "year",
+         show != "All") %>%
+  summarise(sum(usd_gross)) %>%
+  pull()
+
+rev <- paste0(round(total_rev / 1000000000, 2), "B")
+              
+valueBox(rev, 
+         icon = "fa-dollar-sign",
+         color = "#CEE397")
+```
+
+
+### Average filled capacity {.value-box}
+
+```{r}
+capacity_percent <- grosses_summarised %>%
+  filter(period == "year",
+         show != "All") %>%
+  summarise(mean(pct_capacity)) %>%
+  pull()
+
+capacity <- paste0(round(capacity_percent * 100), "%")
+
+gauge(capacity, min = 0, max = 100, symbol = "%", gaugeSectors(
+  success = c(70, 100), warning = c(30, 60), danger = c(0, 20)
+))
+```
+
+
+### Total seats sold {.value-box}
+
+```{r}
+seats_sold <- grosses_summarised %>%
+  filter(period == "year",
+         show != "All") %>%
+  summarise(sum(nb_seats_sold)) %>%
+  pull()
+
+seats <- paste0(round(seats_sold / 1000000, 2), "M")
+
+valueBox(seats, 
+         icon = "fa-chart-line",
+         color = "#8DB1AB")
+```
+
+Row {.tabset .tabset-fade}
+----------------------------------------------------------------------
+
+```{r}
+top_shows <- grosses_clean %>%
+  group_by(show) %>%
+  summarise(total_gross = sum(weekly_gross, na.rm = TRUE)) %>%
+  arrange(desc(total_gross)) %>%
+  ungroup() %>%
+  head(10) %>%
+  select(show) %>%
+  pull()
+
+grosses_summarised <- grosses_clean %>%
+  filter(show %in% top_shows) %>%
+  cross_by_dimensions(show) %>%
+  cross_by_periods(c("month", "quarter", "year"),
+                   windows = 28) %>% 
+  summarise(
+    usd_gross = sum(weekly_gross, na.rm = TRUE),
+    avg_ticket_price = mean(avg_ticket_price, na.rm = TRUE),
+    nb_seats_sold = sum(seats_sold, na.rm = TRUE),
+    pct_capacity = mean(pct_capacity, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  mutate(year = year(date))
+```
+
+### Average ticket price
+
+```{r, fig.width=16, fig.height = 7}
+p1 <- grosses_summarised %>%
+  filter(period == "quarter",
+         show != "All") %>%
+  mutate(show = fct_reorder(show, avg_ticket_price)) %>%
+  ggplot(aes(x = avg_ticket_price)) +
+  geom_density(aes(fill = show), alpha = 0.7) +
+  scale_fill_igv() +
+  guides(fill = "none") +
+  labs(x = "Average ticket price", 
+       y = "Show",
+       title = "Book of Mormon prices fall as Hamilton continues to rise") +
+  theme(legend.text = element_text(size = rel(0.4)),
+        plot.title = element_text(size = rel(0.8))
+        )
+
+fig1 <- ggplotly(p1)
+
+fig1
+```
+
+
+### Total revenue by show
+
+```{r, fig.width=16, fig.height = 7}
+p2 <- grosses_summarised %>%
+  filter(show != "All",
+         period == "year") %>% 
+  mutate(show = fct_reorder(show, usd_gross)) %>% 
+  ggplot(aes(x = date,
+             y = usd_gross,
+             fill = show)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_igv() +
+  scale_x_date(date_breaks = "5 years", date_labels = "%Y") +
+  scale_y_continuous(labels = scales::dollar_format()) +
+  theme(
+    legend.text = element_text(size = rel(0.8)),
+    legend.title = element_blank(),
+    legend.position = "bottom"
+  ) +
+  labs(x = "",
+       y = "Total revenue",
+       title = "Wicked remains a powerhouse but Hamilton takes the crown") +
+  theme(legend.text = element_text(size = rel(0.4)),
+        plot.title = element_text(size = rel(0.8))
+        )
+
+fig2 <- ggplotly(p2)
+
+fig2
+```
+
+### Average % of seats sold per show
+
+```{r, fig.width=16, fig.height = 7}
+p3 <- grosses_summarised %>%
+  filter(period == "quarter",
+         show != "All") %>%
+  ggplot(aes(x = date,
+             y = pct_capacity,
+             colour = show)) +
+  geom_line(size = 1) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  expand_limits(y = 0) +
+  scale_color_igv() +
+  labs(x = "",
+       y = "Seats sold",
+       title = "Newcomers Hamilton and Book of Mormon sell out") +
+  theme(
+    legend.text = element_text(size = rel(0.4)),
+    legend.title = element_blank(),
+    legend.position = "bottom",
+    plot.title = element_text(size = rel(0.8)),
+    plot.subtitle = element_text(size = rel(0.6))
+  )
+
+fig3 <- ggplotly(p3)
+
+fig3
+```
